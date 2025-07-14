@@ -1,0 +1,13 @@
+# ROS 2 colcon workspace files
+build/
+install/
+log/
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+
+# Common temporary files
+*~
+.DS_Store

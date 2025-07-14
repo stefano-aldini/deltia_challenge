@@ -1,0 +1,5 @@
+/camera:
+  ros__parameters:
+    i_nn_type: "spatial"
+    i_nn_model: "yolo-v4-tiny-tf_openvino_2021.4_6shave.blob"
+    i_spatial_bb: true
