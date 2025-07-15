@@ -95,7 +95,6 @@ def main(args=None):
 
     def on_cancel():
         node.send_cancel_operation()
-        root.destroy() # Close the GUI on cancel
 
     # --- GUI Widgets ---
     label = tk.Label(root, text="Robot Control Panel", font=("Arial", 14))
