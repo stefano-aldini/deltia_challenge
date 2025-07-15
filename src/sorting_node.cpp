@@ -14,6 +14,7 @@
 #include "sensor_msgs/msg/camera_info.hpp"
 #include "sensor_msgs/msg/point_cloud2.hpp"
 #include "std_msgs/msg/float64.hpp"
+#include "std_msgs/msg/string.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "pcl_conversions/pcl_conversions.h"
 #include <pcl/point_cloud.h>
@@ -74,6 +75,9 @@ public:
 
         // Publisher for the object width
         width_publisher_ = this->create_publisher<std_msgs::msg::Float64>("/object_width", 10);
+
+        // Publisher for the object class
+        class_publisher_ = this->create_publisher<std_msgs::msg::String>("/object_class", 10);
 
         // Subscribers for GUI control
         start_detection_sub_ = this->create_subscription<std_msgs::msg::Bool>(
@@ -293,8 +297,18 @@ private:
             width_msg.data = object_width_m;
             width_publisher_->publish(width_msg);
 
-            RCLCPP_INFO(this->get_logger(), "Object in workspace found at robot frame: (%.2f, %.2f, %.2f m), width: %.3f m",
-                t.transform.translation.x, t.transform.translation.y, t.transform.translation.z, object_width_m);
+            // Publish the object class
+            std_msgs::msg::String class_msg;
+            if (!selected_detection->results.empty()) {
+                class_msg.data = selected_detection->results[0].class_id;
+            } else {
+                class_msg.data = "object0"; // Fallback class
+            }
+            class_publisher_->publish(class_msg);
+
+
+            RCLCPP_INFO(this->get_logger(), "Object in workspace found at robot frame: (%.2f, %.2f, %.2f m), width: %.3f m, class: %s",
+                t.transform.translation.x, t.transform.translation.y, t.transform.translation.z, object_width_m, class_msg.data.c_str());
         } else {
             object_width_m = 0.0; // Reset width if no object is found in the workspace
             // Publish zero width when no valid object is detected
@@ -320,6 +334,10 @@ private:
      * @brief Publisher for the object width.
      */
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr width_publisher_;
+    /**
+     * @brief Publisher for the object class.
+     */
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr class_publisher_;
     /**
      * @brief Subscribers for GUI control signals.
      */

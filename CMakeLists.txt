@@ -46,27 +46,28 @@ ament_target_dependencies(action_node
     tf2_ros
     geometry_msgs
     std_msgs
+    sensor_msgs
 )
 
 install(TARGETS
-    sorting_node
-    action_node
-    DESTINATION lib/${PROJECT_NAME}
+  sorting_node
+  action_node
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 install(
-    DIRECTORY launch
-    DESTINATION share/${PROJECT_NAME}
+  DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME}
+)
+
+install(PROGRAMS
+  scripts/gui_node.py
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 install(
-    PROGRAMS scripts/gui_node.py
-    DESTINATION lib/${PROJECT_NAME}
-)
-
-install(
-    DIRECTORY config
-    DESTINATION share/${PROJECT_NAME}
+  DIRECTORY config
+  DESTINATION share/${PROJECT_NAME}
 )
 
 ament_package()

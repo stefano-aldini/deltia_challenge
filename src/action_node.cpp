@@ -16,8 +16,10 @@
 #include <geometry_msgs/msg/pose.hpp>
 #include <franka_msgs/action/grasp.hpp>
 #include <std_msgs/msg/float64.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
+#include <map>
 
 /**
  * @class ActionNode
@@ -43,12 +45,35 @@ public:
         tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
         tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
+        // Declare and load placement poses from parameters
+        this->declare_parameter("placements.object0.x", 0.0);
+        this->declare_parameter("placements.object0.y", -0.2);
+        this->declare_parameter("placements.object0.z", 0.2);
+        this->declare_parameter("placements.object1.x", 0.2);
+        this->declare_parameter("placements.object1.y", -0.2);
+        this->declare_parameter("placements.object1.z", 0.2);
+        this->declare_parameter("placements.object2.x", -0.2);
+        this->declare_parameter("placements.object2.y", -0.2);
+        this->declare_parameter("placements.object2.z", 0.2);
+
+        placement_poses_["object0"] = get_pose_from_params("placements.object0");
+        placement_poses_["object1"] = get_pose_from_params("placements.object1");
+        placement_poses_["object2"] = get_pose_from_params("placements.object2");
+
+
         // Subscriber for object width
         width_sub_ = this->create_subscription<std_msgs::msg::Float64>(
             "/object_width", 10,
             [this](const std_msgs::msg::Float64::SharedPtr msg) {
                 this->object_width_ = msg->data;
                 this->has_received_width_ = true;
+            });
+
+        // Subscriber for object class
+        class_sub_ = this->create_subscription<std_msgs::msg::String>(
+            "/object_class", 10,
+            [this](const std_msgs::msg::String::SharedPtr msg) {
+                this->object_class_ = msg->data;
             });
 
         // Subscriber for gripper joint states to check grasp success
@@ -174,6 +199,7 @@ private:
             RCLCPP_INFO(this->get_logger(), "Pick and place complete. Returning to IDLE state.");
             state_ = State::IDLE;
             has_received_width_ = false; // Reset for next object
+            object_class_ = "object0"; // Reset to default
             movement_enabled_ = false; // Wait for next GUI command
             break;
         }
@@ -220,17 +246,17 @@ private:
     }
 
     /**
-     * @brief Defines the fixed placement pose for the object.
+     * @brief Retrieves the placement pose based on the detected object's class.
      * @return The target placement pose.
      */
     geometry_msgs::msg::Pose get_place_pose()
     {
-        geometry_msgs::msg::Pose pose;
-        pose.position.x = 0.0;
-        pose.position.y = -0.20;
-        pose.position.z = 0.2;
-        pose.orientation.w = 1.0; // Neutral orientation
-        return pose;
+        if (placement_poses_.count(object_class_)) {
+            RCLCPP_INFO(this->get_logger(), "Using placement pose for class: '%s'", object_class_.c_str());
+            return placement_poses_[object_class_];
+        }
+        RCLCPP_WARN(this->get_logger(), "No placement pose found for class: '%s'. Using default.", object_class_.c_str());
+        return placement_poses_["object0"];
     }
 
     /**
@@ -297,6 +323,7 @@ private:
             state_ = State::IDLE;
             movement_enabled_ = false;
             has_received_width_ = false;
+            object_class_ = "object0";
         }
     }
 
@@ -351,6 +378,21 @@ private:
         RCLCPP_INFO(this->get_logger(), "Sent close gripper goal (force-based).");
     }
 
+    /**
+     * @brief Helper function to construct a Pose message from parameters.
+     * @param param_base_name The base name for the x, y, z parameters (e.g., "placements.default").
+     * @return A geometry_msgs::msg::Pose object.
+     */
+    geometry_msgs::msg::Pose get_pose_from_params(const std::string& param_base_name)
+    {
+        geometry_msgs::msg::Pose pose;
+        pose.position.x = this->get_parameter(param_base_name + ".x").as_double();
+        pose.position.y = this->get_parameter(param_base_name + ".y").as_double();
+        pose.position.z = this->get_parameter(param_base_name + ".z").as_double();
+        pose.orientation.w = 1.0; // Neutral orientation
+        return pose;
+    }
+
     // Member variables
     /// @brief Action client for the franka gripper.
     rclcpp_action::Client<franka_msgs::action::Grasp>::SharedPtr grasp_client_;
@@ -360,6 +402,8 @@ private:
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
     /// @brief Subscriber for the detected object's width.
     rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr width_sub_;
+    /// @brief Subscriber for the detected object's class.
+    rclcpp::Subscription<std_msgs::msg::String>::SharedPtr class_sub_;
     /// @brief Subscribers for GUI control signals.
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr start_movement_sub_;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr cancel_operation_sub_;
@@ -371,12 +415,16 @@ private:
     State state_ = State::IDLE;
     /// @brief The last received width of the object.
     double object_width_ = 0.0;
+    /// @brief The class name of the detected object.
+    std::string object_class_ = "object0";
     /// @brief The current measured width of the gripper opening.
     double current_gripper_width_ = 0.0;
     /// @brief Flag to indicate if a valid width has been received.
     bool has_received_width_ = false;
     /// @brief Flag to control whether the state machine is active.
     bool movement_enabled_ = false;
+    /// @brief Map of placement poses loaded from parameters.
+    std::map<std::string, geometry_msgs::msg::Pose> placement_poses_;
 };
 
 /**

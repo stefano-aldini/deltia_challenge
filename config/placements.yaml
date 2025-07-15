@@ -1,0 +1,15 @@
+action_node:
+  ros__parameters:
+    placements:
+      object0:
+        x: 0.0
+        y: -0.2
+        z: 0.2
+      object1:
+        x: 0.2
+        y: -0.2
+        z: 0.2
+      object2:
+        x: -0.2
+        y: -0.2
+        z: 0.2

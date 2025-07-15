@@ -5,8 +5,13 @@ from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
 from launch.conditions import IfCondition, UnlessCondition
 from launch_ros.actions import Node
+import os
+from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
+    pkg_share = get_package_share_directory('deltia_challenge')
+    config_file = os.path.join(pkg_share, 'config', 'placements.yaml')
+
     return LaunchDescription([
         DeclareLaunchArgument(
             'robot_ip',
@@ -106,26 +111,8 @@ def generate_launch_description():
                 ])
             }.items()
         ),
-        Node(
-            package='deltia_challenge',
-            executable='sorting_node',
-            name='sorting_node',
-            output='screen',
-            condition=IfCondition(LaunchConfiguration('use_camera'))
-        ),
-        Node(
-            package='deltia_challenge',
-            executable='action_node',
-            name='action_node',
-            output='screen',
-            condition=IfCondition(LaunchConfiguration('use_camera'))
-        ),
-        Node(
-            package='deltia_challenge',
-            executable='gui_node.py',
-            name='control_gui',
-            output='screen'
-        ),
+
+        # Include the RViz launch file
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource([
                 PathJoinSubstitution([
@@ -134,5 +121,30 @@ def generate_launch_description():
                     'rviz.launch.py'
                 ])
             ])
-        )
+        ),
+
+        # Launch the sorting node
+        Node(
+            package='deltia_challenge',
+            executable='sorting_node',
+            name='sorting_node',
+            output='screen'
+        ),
+
+        # Launch the action node
+        Node(
+            package='deltia_challenge',
+            executable='action_node',
+            name='action_node',
+            output='screen',
+            parameters=[config_file]
+        ),
+
+        # Launch the GUI node
+        Node(
+            package='deltia_challenge',
+            executable='gui_node.py',
+            name='control_gui',
+            output='screen'
+        ),
     ])
