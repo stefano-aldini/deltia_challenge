@@ -59,6 +59,9 @@ ActionNode::ActionNode(const rclcpp::NodeOptions & options) : Node("action_node"
         "/cancel_operation", 10,
         std::bind(&ActionNode::cancel_operation_callback, this, std::placeholders::_1));
 
+    // Publisher to control the sorting_node
+    detection_control_pub_ = this->create_publisher<std_msgs::msg::Bool>("/start_detection", 10);
+
     // Main timer to run the state machine
     timer_ = this->create_wall_timer(
         std::chrono::seconds(1),
@@ -110,6 +113,8 @@ void ActionNode::run_state_machine()
         RCLCPP_INFO(this->get_logger(), "State: CHECK_GRASP");
         if (abs(current_gripper_width_ - object_width_) < 0.01) {
             RCLCPP_INFO(this->get_logger(), "Grasp successful. Gripper width: %.3f m", current_gripper_width_);
+            RCLCPP_INFO(this->get_logger(), "Pausing object detection.");
+            publish_detection_control(false); // Pause detection
             state_ = State::MOVE_TO_PLACE;
         } else {
             RCLCPP_ERROR(this->get_logger(), "Grasp failed. Expected width: %.3f, actual: %.3f. Releasing and returning to IDLE.", object_width_, current_gripper_width_);
@@ -120,12 +125,25 @@ void ActionNode::run_state_machine()
         break;
 
     case State::MOVE_TO_PLACE:
-        RCLCPP_INFO(this->get_logger(), "State: MOVE_TO_PLACE");
-        if (move_to_pose(get_place_pose()))
-        {
-            state_ = State::RELEASE_OBJECT;
-        }
-        break;
+            RCLCPP_INFO(this->get_logger(), "State: MOVE_TO_PLACE");
+            // Continuously check if the object has been dropped
+            if (current_gripper_force_ < 5.0) { // Threshold for grasp loss in Newtons
+                RCLCPP_ERROR(this->get_logger(), "Object lost during transport! Force dropped to %.2f N.", current_gripper_force_);
+                // Stop current motion (though MoveIt might need more to halt immediately)
+                // Re-enable detection and go home to restart the process
+                publish_detection_control(true);
+                move_to_named_pose("ready");
+                state_ = State::IDLE;
+                has_received_width_ = false;
+                movement_enabled_ = false; // Require GUI to start again
+                break;
+            }
+
+            if (move_to_pose(get_place_pose()))
+            {
+                state_ = State::RELEASE_OBJECT;
+            }
+            break;
 
     case State::RELEASE_OBJECT:
         RCLCPP_INFO(this->get_logger(), "State: RELEASE_OBJECT");
@@ -138,6 +156,8 @@ void ActionNode::run_state_machine()
         RCLCPP_INFO(this->get_logger(), "State: RETURN_HOME");
         move_to_named_pose("ready");
         RCLCPP_INFO(this->get_logger(), "Pick and place complete. Returning to IDLE state.");
+        RCLCPP_INFO(this->get_logger(), "Resuming object detection.");
+        publish_detection_control(true); // Resume detection
         state_ = State::IDLE;
         has_received_width_ = false;
         object_class_ = "object0";
@@ -223,6 +243,7 @@ void ActionNode::cancel_operation_callback(const std_msgs::msg::Bool::SharedPtr 
 {
     if (msg->data) {
         RCLCPP_INFO(this->get_logger(), "Operation cancelled by GUI. Returning to IDLE state.");
+        publish_detection_control(true); // Also re-enable detection on cancel
         state_ = State::IDLE;
         movement_enabled_ = false;
         has_received_width_ = false;
@@ -234,6 +255,10 @@ void ActionNode::gripper_joint_callback(const sensor_msgs::msg::JointState::Shar
 {
     if (msg->position.size() >= 2) {
         current_gripper_width_ = msg->position[0] + msg->position[1];
+    }
+    if (msg->effort.size() >= 2) {
+        // Sum the absolute effort of both gripper fingers
+        current_gripper_force_ = std::abs(msg->effort[0]) + std::abs(msg->effort[1]);
     }
 }
 
@@ -273,6 +298,13 @@ geometry_msgs::msg::Pose ActionNode::get_pose_from_params(const std::string& par
     pose.position.z = this->get_parameter(param_base_name + ".z").as_double();
     pose.orientation.w = 1.0;
     return pose;
+}
+
+void ActionNode::publish_detection_control(bool enable)
+{
+    auto msg = std_msgs::msg::Bool();
+    msg.data = enable;
+    detection_control_pub_->publish(msg);
 }
 
 int main(int argc, char * argv[])

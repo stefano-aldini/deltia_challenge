@@ -51,7 +51,9 @@ private:
     void start_movement_callback(const std_msgs::msg::Bool::SharedPtr msg);
     void cancel_operation_callback(const std_msgs::msg::Bool::SharedPtr msg);
     geometry_msgs::msg::Pose get_pose_from_params(const std::string& param_name);
+    void publish_detection_control(bool enable);
 
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr detection_control_pub_;
     rclcpp_action::Client<franka_msgs::action::Grasp>::SharedPtr grasp_client_;
     std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
@@ -65,6 +67,7 @@ private:
     double object_width_ = 0.0;
     std::string object_class_ = "object0";
     double current_gripper_width_ = 0.0;
+    double current_gripper_force_ = 0.0;
     bool has_received_width_ = false;
     bool movement_enabled_ = false;
     std::map<std::string, geometry_msgs::msg::Pose> placement_poses_;
