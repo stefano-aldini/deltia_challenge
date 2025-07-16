@@ -7,6 +7,9 @@
 
 ActionNode::ActionNode(const rclcpp::NodeOptions & options) : Node("action_node", options)
 {
+    // Initialize MoveGroupInterface
+    move_group_ = std::make_shared<moveit::planning_interface::MoveGroupInterface>(shared_from_this(), "franka_arm");
+
     // Initialize TF2 listener
     tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
@@ -61,6 +64,8 @@ ActionNode::ActionNode(const rclcpp::NodeOptions & options) : Node("action_node"
 
     // Publisher to control the sorting_node
     detection_control_pub_ = this->create_publisher<std_msgs::msg::Bool>("/start_detection", 10);
+    // Publisher for the current state machine state
+    state_pub_ = this->create_publisher<std_msgs::msg::String>("/robot_fsm_state", 10);
 
     // Main timer to run the state machine
     timer_ = this->create_wall_timer(
@@ -70,7 +75,16 @@ ActionNode::ActionNode(const rclcpp::NodeOptions & options) : Node("action_node"
 
 void ActionNode::run_state_machine()
 {
-    if (!movement_enabled_) {
+    // Publish the current state for the GUI
+    state_pub_->publish(get_state_as_string());
+
+    if (!movement_enabled_ && state_ != State::IDLE) {
+        // If movement is disabled mid-cycle (e.g., by cancel), force return to idle
+        RCLCPP_WARN(this->get_logger(), "Movement disabled, forcing return to home and IDLE state.");
+        move_to_named_pose("ready");
+        state_ = State::IDLE;
+        locked_target_class_ = "";
+        has_received_width_ = false;
         return;
     }
 
@@ -80,25 +94,45 @@ void ActionNode::run_state_machine()
         RCLCPP_INFO_ONCE(this->get_logger(), "State: IDLE. Waiting for object...");
         if (is_object_ready())
         {
-            RCLCPP_INFO(this->get_logger(), "Object detected. Starting pick and place.");
+            RCLCPP_INFO(this->get_logger(), "Object of class '%s' detected. Locking target class and starting pick.", object_class_.c_str());
+            locked_target_class_ = object_class_; // Lock on to the current object's class
             open_gripper();
             state_ = State::MOVE_TO_PRE_GRASP;
         }
         break;
 
     case State::MOVE_TO_PRE_GRASP:
-        RCLCPP_INFO(this->get_logger(), "State: MOVE_TO_PRE_GRASP");
-        if (move_to_pose(get_pre_grasp_pose()))
         {
-            state_ = State::MOVE_TO_GRASP;
+            RCLCPP_INFO(this->get_logger(), "State: MOVE_TO_PRE_GRASP");
+            auto target_pose = get_pre_grasp_pose();
+            auto current_pose = move_group_->getCurrentPose().pose;
+            if (calculate_distance(current_pose, target_pose) < 0.01) { // 1cm tolerance
+                RCLCPP_INFO(this->get_logger(), "Reached pre-grasp pose.");
+                state_ = State::MOVE_TO_GRASP;
+            } else {
+                move_to_pose(target_pose); // Re-plan on each tick
+            }
         }
         break;
 
     case State::MOVE_TO_GRASP:
-        RCLCPP_INFO(this->get_logger(), "State: MOVE_TO_GRASP");
-        if (move_to_pose(get_grasp_pose()))
         {
-            state_ = State::GRASP_OBJECT;
+            RCLCPP_INFO(this->get_logger(), "State: MOVE_TO_GRASP");
+            auto target_pose = get_current_object_pose();
+            if (target_pose.orientation.w == 0.0) { // Check for invalid pose
+                RCLCPP_ERROR(this->get_logger(), "Grasp target is invalid. Returning to IDLE.");
+                state_ = State::IDLE;
+                movement_enabled_ = false;
+                locked_target_class_ = "";
+                break;
+            }
+            auto current_pose = move_group_->getCurrentPose().pose;
+            if (calculate_distance(current_pose, target_pose) < 0.01) { // 1cm tolerance
+                RCLCPP_INFO(this->get_logger(), "Reached grasp pose.");
+                state_ = State::GRASP_OBJECT;
+            } else {
+                move_to_pose(target_pose); // Re-plan on each tick
+            }
         }
         break;
 
@@ -158,10 +192,11 @@ void ActionNode::run_state_machine()
         RCLCPP_INFO(this->get_logger(), "Pick and place complete. Returning to IDLE state.");
         RCLCPP_INFO(this->get_logger(), "Resuming object detection.");
         publish_detection_control(true); // Resume detection
+        locked_target_class_ = ""; // Clear the class lock
         state_ = State::IDLE;
         has_received_width_ = false;
         object_class_ = "object0";
-        movement_enabled_ = false;
+        // Do NOT set movement_enabled_ to false, to allow the loop to continue
         break;
     }
 }
@@ -172,24 +207,47 @@ bool ActionNode::is_object_ready()
     {
         return false;
     }
+
+    // If we are already in a cycle, ensure the detected object class matches our locked class
+    if (!locked_target_class_.empty() && locked_target_class_ != object_class_) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000, "Ignoring object of class '%s' because we are locked on to class '%s'.", object_class_.c_str(), locked_target_class_.c_str());
+        return false;
+    }
+
     return tf_buffer_->canTransform("fr3_link0", "object_link", tf2::TimePointZero);
 }
 
-geometry_msgs::msg::Pose ActionNode::get_grasp_pose()
+geometry_msgs::msg::Pose ActionNode::get_current_object_pose()
 {
-    geometry_msgs::msg::TransformStamped t = tf_buffer_->lookupTransform("fr3_link0", "object_link", tf2::TimePointZero);
-    geometry_msgs::msg::Pose pose;
-    pose.position.x = t.transform.translation.x;
-    pose.position.y = t.transform.translation.y;
-    pose.position.z = t.transform.translation.z;
-    pose.orientation = t.transform.rotation;
-    return pose;
+    // First, check if we are locked onto a class and if the current detection matches it.
+    if (!locked_target_class_.empty() && locked_target_class_ != object_class_) {
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+            "Target class lock lost! Expected '%s' but currently detecting '%s'. Halting.",
+            locked_target_class_.c_str(), object_class_.c_str());
+        return geometry_msgs::msg::Pose(); // Return an invalid pose
+    }
+
+    try {
+        geometry_msgs::msg::TransformStamped t = tf_buffer_->lookupTransform("fr3_link0", "object_link", tf2::TimePointZero);
+        geometry_msgs::msg::Pose pose;
+        pose.position.x = t.transform.translation.x;
+        pose.position.y = t.transform.translation.y;
+        pose.position.z = t.transform.translation.z;
+        pose.orientation = t.transform.rotation;
+        return pose;
+    } catch (const tf2::TransformException & ex) {
+        RCLCPP_ERROR_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "Could not transform object_link: %s", ex.what());
+        return geometry_msgs::msg::Pose(); // Return an invalid pose on failure
+    }
 }
 
 geometry_msgs::msg::Pose ActionNode::get_pre_grasp_pose()
 {
-    geometry_msgs::msg::Pose grasp_pose = get_grasp_pose();
-    grasp_pose.position.z += 0.10;
+    geometry_msgs::msg::Pose grasp_pose = get_current_object_pose();
+    // Only calculate pre-grasp if the grasp pose is valid
+    if (grasp_pose.orientation.w != 0.0) {
+        grasp_pose.position.z += 0.10;
+    }
     return grasp_pose;
 }
 
@@ -205,13 +263,12 @@ geometry_msgs::msg::Pose ActionNode::get_place_pose()
 
 bool ActionNode::move_to_pose(const geometry_msgs::msg::Pose& pose)
 {
-    moveit::planning_interface::MoveGroupInterface move_group(shared_from_this(), "franka_arm");
-    move_group.setPoseTarget(pose);
+    move_group_->setPoseTarget(pose);
     moveit::planning_interface::MoveGroupInterface::Plan my_plan;
-    bool success = (move_group.plan(my_plan) == moveit::core::MoveItErrorCode::SUCCESS);
+    bool success = (move_group_->plan(my_plan) == moveit::core::MoveItErrorCode::SUCCESS);
     if (success)
     {
-        move_group.execute(my_plan);
+        move_group_->execute(my_plan);
     }
     else
     {
@@ -222,9 +279,8 @@ bool ActionNode::move_to_pose(const geometry_msgs::msg::Pose& pose)
 
 void ActionNode::move_to_named_pose(const std::string& pose_name)
 {
-    moveit::planning_interface::MoveGroupInterface move_group(shared_from_this(), "franka_arm");
-    move_group.setNamedTarget(pose_name);
-    move_group.move();
+    move_group_->setNamedTarget(pose_name);
+    move_group_->move();
 }
 
 void ActionNode::start_movement_callback(const std_msgs::msg::Bool::SharedPtr msg)
@@ -244,6 +300,7 @@ void ActionNode::cancel_operation_callback(const std_msgs::msg::Bool::SharedPtr 
     if (msg->data) {
         RCLCPP_INFO(this->get_logger(), "Operation cancelled by GUI. Returning to IDLE state.");
         publish_detection_control(true); // Also re-enable detection on cancel
+        locked_target_class_ = ""; // Clear the class lock
         state_ = State::IDLE;
         movement_enabled_ = false;
         has_received_width_ = false;
@@ -300,11 +357,37 @@ geometry_msgs::msg::Pose ActionNode::get_pose_from_params(const std::string& par
     return pose;
 }
 
+double ActionNode::calculate_distance(const geometry_msgs::msg::Pose& pose1, const geometry_msgs::msg::Pose& pose2)
+{
+    double dx = pose1.position.x - pose2.position.x;
+    double dy = pose1.position.y - pose2.position.y;
+    double dz = pose1.position.z - pose2.position.z;
+    return std::sqrt(dx*dx + dy*dy + dz*dz);
+}
+
 void ActionNode::publish_detection_control(bool enable)
 {
     auto msg = std_msgs::msg::Bool();
     msg.data = enable;
     detection_control_pub_->publish(msg);
+}
+
+std_msgs::msg::String ActionNode::get_state_as_string()
+{
+    std_msgs::msg::String msg;
+    switch (state_)
+    {
+        case State::IDLE: msg.data = "IDLE"; break;
+        case State::MOVE_TO_PRE_GRASP: msg.data = "MOVING TO PRE-GRASP"; break;
+        case State::MOVE_TO_GRASP: msg.data = "MOVING TO GRASP"; break;
+        case State::GRASP_OBJECT: msg.data = "GRASPING"; break;
+        case State::CHECK_GRASP: msg.data = "CHECKING GRASP"; break;
+        case State::MOVE_TO_PLACE: msg.data = "MOVING TO PLACE"; break;
+        case State::RELEASE_OBJECT: msg.data = "RELEASING"; break;
+        case State::RETURN_HOME: msg.data = "RETURNING HOME"; break;
+        default: msg.data = "UNKNOWN"; break;
+    }
+    return msg;
 }
 
 int main(int argc, char * argv[])

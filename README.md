@@ -1,79 +1,59 @@
-# Deltia Challenge: Vision-Based Pick, Sort, and Place
+# Deltia Challenge - Autonomous Pick and Place
 
-This ROS 2 project implements a complete system for a robot to perform a vision-based pick, sort, and place task. The system is designed to identify objects of different classes using a 3D camera, pick them up with a robotic arm, and place them in different, pre-configured locations based on their class.
+This ROS 2 package implements an autonomous pick-and-place system for the Franka Emika robot arm. The system is designed to detect, classify, and sort objects in a workspace using a camera for perception and a state-machine-driven controller for robust robot actions.
 
-## Target Hardware
+## Features
 
-*   **Robot:** Franka Emulation Robot. The control is managed through `ros2_control` and MoveIt2.
-*   **Camera:** OAK-D 3D Camera. The project uses the `depthai_ros_driver` to get spatial detection data and point clouds.
+- **Autonomous Loop**: Once started, the system continuously detects, picks, and places objects until the workspace is clear or the operation is cancelled.
+- **Real-time Trajectory Correction**: The robot tracks the target object's position in real-time during its approach, allowing it to grasp objects that move slightly.
+- **Target Locking by Class**: To avoid getting distracted by multiple objects, the system "locks on" to the class of a target object and will ignore other objects until the current cycle is complete.
+- **Grasp Stability Check**: After grasping, the robot monitors the gripper force. If the object is dropped, the robot aborts the current task and returns home to restart the cycle.
+- **Robust State Machine**: The core logic is built around a state machine that handles the sequence of operations and gracefully recovers from failures (e.g., failed motion plan, lost object).
+- **Simple User Interface**: A Python-based GUI allows for easy starting, stopping, and monitoring of the system's status.
 
-The system can be run in a simulated environment (`use_fake_hardware:=true`) without needing the physical hardware.
+## System Components
 
-## System Architecture
+The system consists of three main nodes:
 
-The application consists of three main ROS 2 nodes that work together:
+- **`action_node` (C++)**: The brain of the operation. This node runs the core state machine, interfaces with MoveIt2 for motion planning, controls the gripper, and makes decisions based on perception data.
+- **`sorting_node` (C++)**: The perception system. This node processes camera data to detect objects, determine their class and pose, and publishes this information for the `action_node`.
+- **`gui_node.py` (Python)**: A Tkinter-based GUI that provides simple controls (Start/Cancel) and status feedback (Robot/Camera connection, Detection status, Robot state).
 
-### 1. `gui_node.py` - Control Interface
+## Dependencies
 
-A simple Python-based GUI built with Tkinter that provides high-level control over the system. It features:
-*   **Start Detection:** Enables the `sorting_node` to start looking for objects.
-*   **Start Movement:** Enables the `action_node` to begin the pick-and-place sequence once an object is found.
-*   **Cancel Operation:** Stops the current operation and returns both nodes to an idle state.
-*   **Status Indicators:** Shows the connection status ("Connected"/"Disconnected") for the robot and camera.
+This package depends on the following ROS 2 packages:
+- `rclcpp`, `rclcpp_action`, `rclpy`
+- `moveit_ros_planning_interface`
+- `franka_msgs`
+- `tf2_ros`, `tf2_geometry_msgs`
+- `geometry_msgs`, `sensor_msgs`, `std_msgs`
+- `depthai_ros_msgs` (for the perception node)
+- `pcl_conversions`
 
-### 2. `sorting_node` (C++) - Perception
+## How to Use
 
-This node is responsible for all vision processing tasks.
-*   **Input:** Subscribes to spatial detection messages and point cloud data from the OAK-D camera.
-*   **Processing:** It identifies objects within a defined workspace, calculates their precise 3D pose and orientation using the Point Cloud Library (PCL), and determines the object's class from the detection message.
-*   **Output:** Publishes the object's pose as a TF2 transform (`object_link`), its width, and its class name to be used by the `action_node`.
+1.  **Build the Workspace**
+    ```bash
+    cd /home/stef/dev
+    colcon build --packages-select deltia_challenge
+    ```
 
-### 3. `action_node` (C++) - Robot Control
+2.  **Source the Workspace**
+    ```bash
+    source /home/stef/dev/install/setup.bash
+    ```
 
-This node controls the robot's actions based on the information from the perception node.
-*   **State Machine:** Implements a robust state machine to manage the entire pick-and-place sequence (e.g., `MOVE_TO_PRE_GRASP`, `GRASP_OBJECT`, `MOVE_TO_PLACE`).
-*   **Motion Planning:** Uses the MoveIt2 `MoveGroupInterface` for all motion planning, ensuring collision-free and singularity-free trajectories.
-*   **Grasping:**
-    *   It uses a force-based grasp for robustness.
-    *   It verifies a successful grasp by checking the final gripper width against the expected object width.
-*   **Sorting:** Subscribes to the object's class name and uses it to look up the correct placement coordinates from a configuration file.
+3.  **Launch the System**
+    Run the main launch file which starts all the required nodes.
+    ```bash
+    ros2 launch deltia_challenge challenge.launch.py
+    ```
+
+4.  **Operate the GUI**
+    - **1. Start Detection**: Click this to activate the perception system. The status indicators will show when the camera is active and if an object is found.
+    - **2. Start Autonomous Cycle**: Click this to enable robot movement. The robot will begin its continuous pick-and-place loop.
+    - **Cancel Operation**: Click this at any time to stop the robot, return it to its home position, and deactivate the autonomous cycle.
 
 ## Configuration
 
-The placement locations for different object classes are not hardcoded. They can be easily modified by editing the `config/placements.yaml` file. This allows for quick reconfiguration of the sorting bins without recompiling the code.
-
-Example `placements.yaml`:
-```yaml
-action_node:
-  ros__parameters:
-    placements:
-      object0:
-        x: 0.0
-        y: -0.2
-        z: 0.2
-      object1:
-        x: 0.2
-        y: -0.2
-        z: 0.2
-      object2:
-        x: -0.2
-        y: -0.2
-        z: 0.2
-```
-
-## How to Run
-
-1.  Build the workspace with `colcon build`.
-2.  Source the workspace: `source install/setup.bash`.
-3.  Launch the entire system using the main launch file:
-    ```bash
-    ros2 launch deltia_challenge deltia.launch.py
-    ```
-    You can use launch arguments to configure the startup, for example:
-    ```bash
-    # Run in simulation mode
-    ros2 launch deltia_challenge deltia.launch.py use_fake_hardware:=true
-
-    # Run with a real robot
-    ros2 launch deltia_challenge deltia.launch.py use_fake_hardware:=false robot_ip:=<your_robot_ip>
-    ```
+The drop-off locations for different object classes are configured in the `config/placements.yaml` file. You can edit this file to change the target poses for each object type.
